@@ -158,3 +158,19 @@ class AuditEventOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class WhatIfIn(BaseModel):
+    """权重实验台：传一组权重，返回重排名结果（不落库）。"""
+
+    weights: dict[str, float]
+    k: int = Field(default=5, ge=1, le=50)
+
+
+class OutcomeImportOut(BaseModel):
+    ok: bool
+    created: int = 0
+    updated: int = 0
+    skipped: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+

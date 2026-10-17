@@ -186,3 +186,22 @@ class TrendSnapshot(Base):
     candidate_id: Mapped[int] = mapped_column(ForeignKey("product_candidates.id"), index=True)
     heat: Mapped[float] = mapped_column(Float, default=0)
     captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class SelectionOutcome(Base):
+    """推荐结果回流：把"当初推了什么"和"后来卖得怎样"配成对。
+
+    没有这张表，权重永远是拍的——AHP 只能保证判断自洽，不能保证判断对。
+    只有攒够 (推荐 → 实际动销) 的配对样本，才谈得上回归校准和命中率。
+    """
+
+    __tablename__ = "selection_outcomes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(ForeignKey("product_candidates.id"), index=True)
+    external_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    listed: Mapped[bool] = mapped_column(Boolean, default=False)        # 是否真的上架了
+    sold: Mapped[bool] = mapped_column(Boolean, default=False)          # 是否动销
+    sales_30d: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=True)        # 演示/真实来源标记
+    recorded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

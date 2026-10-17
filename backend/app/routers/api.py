@@ -26,11 +26,13 @@ from ..schemas import (
     ImportProductsIn,
     KnowledgeIn,
     KnowledgeOut,
+    OutcomeImportOut,
     ProductSignalIn,
     ReplyApproveIn,
     ReplyDraftOut,
     SettingsUpdateIn,
     TemuIntegrationIn,
+    WhatIfIn,
 )
 from ..services import customer_service as cs
 from ..services.importer import import_csv_content, import_signals
@@ -422,3 +424,112 @@ def api_dashboard(db: Session = Depends(get_db)):
         "automation_level": get_setting(db, "automation_level"),
         "target_markets": get_setting(db, "target_markets"),
     }
+
+
+# ---------------------------------------------------------------- 评分分析与结果回流
+@router.get("/scoring/weights-derivation")
+def api_weights_derivation():
+    """返回 AHP 推导过程与一致性检验，让"权重从哪来"这个问题有地方可查。"""
+    from ..services.ahp import DIM_CN, analyze, to_setting
+
+    a = analyze()
+    return {
+        "method": "AHP 层次分析法（Saaty 1-9 标度，特征向量法 + 几何平均法交叉验证）",
+        "dims": a["dims"],
+        "dim_names": DIM_CN,
+        "pairwise_matrix": [[round(v, 4) for v in row] for row in a["matrix"]],
+        "weights": to_setting(a),
+        "lambda_max": a["lambda_max"],
+        "consistency_index": a["consistency_index"],
+        "consistency_ratio": a["consistency_ratio"],
+        "consistent": a["consistent"],
+        "verdict": a["verdict"],
+        "caveat": "AHP 只保证两两判断自洽，不保证判断正确。"
+                  "要验证有效性，需要 selection_outcomes 里的真实配对样本做回归。",
+    }
+
+
+@router.post("/scoring/whatif")
+def api_scoring_whatif(payload: WhatIfIn, db: Session = Depends(get_db)):
+    """用给定权重重排候选名单。不写库——实验性质，避免误改生产配置。"""
+    from ..services.sensitivity import DIMS, rank_order, total_of
+
+    absent = [d for d in DIMS if d not in payload.weights]
+    if absent:
+        # 只传 margin=1.0 也能满足"和为 1"，但那等于静默把其余五维当 0，
+        # 是个很容易踩的坑，所以要求维度齐全。
+        raise HTTPException(400, f"缺少分项权重：{', '.join(absent)}（六个维度必须都给）")
+    neg = [d for d, v in payload.weights.items() if v < 0]
+    if neg:
+        raise HTTPException(400, f"权重不能为负：{', '.join(neg)}")
+    total = sum(payload.weights[d] for d in DIMS)
+    if abs(total - 1.0) > 0.001:
+        raise HTTPException(400, f"评分权重之和必须为1，当前 {total:.4f}")
+    rows = []
+    for c in db.query(ProductCandidate).all():
+        sub = {d: float(getattr(c, f"{d}_score") or 0.0) for d in DIMS}
+        rows.append({**sub, "_id": c.id, "_label": (c.normalized_title or "")[:40],
+                     "_rec": c.recommendation, "_old_total": c.total_score})
+    if not rows:
+        return {"ok": True, "items": [], "changed_top": []}
+    old = get_setting(db, "score_weights") or {}
+    base_rank = rank_order(rows, old)
+    new_rank = rank_order(rows, payload.weights)
+    k = min(payload.k, len(rows))
+    items = [{
+        "rank": pos + 1, "candidate_id": rows[cid]["_id"], "title": rows[cid]["_label"],
+        "new_score": round(total_of(rows[cid], payload.weights), 2),
+        "old_score": rows[cid]["_old_total"], "old_rank": base_rank.index(cid) + 1,
+        "sub": {d: rows[cid][d] for d in DIMS},
+    } for pos, cid in enumerate(new_rank[:k * 2])]
+    return {
+        "ok": True, "k": k, "items": items,
+        "top_set_changed": sorted(
+            {rows[c]["_label"] for c in new_rank[:k]} ^ {rows[c]["_label"] for c in base_rank[:k]}),
+        "ranks_moved": sum(1 for pos, cid in enumerate(new_rank) if base_rank.index(cid) != pos),
+        "total_candidates": len(rows),
+    }
+
+
+@router.get("/scoring/sensitivity")
+def api_scoring_sensitivity(trials: int = 300, band: float = 0.2, k: int = 5,
+                            db: Session = Depends(get_db)):
+    """在线跑一次权重扰动分析（默认 300 次，比脚本的 1000 次快）。"""
+    from ..services.sensitivity import DIMS, analyze as sens_analyze
+
+    rows = []
+    for c in db.query(ProductCandidate).all():
+        rows.append({**{d: float(getattr(c, f"{d}_score") or 0.0) for d in DIMS},
+                     "_label": (c.normalized_title or "")[:30]})
+    if len(rows) <= k:
+        raise HTTPException(400, f"候选数 {len(rows)} 不足以做 TOP-{k} 分析")
+    res = sens_analyze(rows, get_setting(db, "score_weights") or {}, k=k,
+                       n_trials=max(20, min(trials, 2000)), band=min(max(band, 0.05), 0.5))
+    res.pop("top_rate_table", None)
+    res["warning"] = ("稳定性来自数据形态而非算法：演示数据中过半商品对是逐项占优的近似重复样本，"
+                      "几乎没有真正的维度权衡。接真实数据后必须重跑。")
+    return res
+
+
+@router.post("/outcomes/import", response_model=OutcomeImportOut)
+async def api_outcomes_import(file: UploadFile = File(...), is_demo: bool = True,
+                              db: Session = Depends(get_db)):
+    """导入"推荐→实际动销"配对结果 CSV。is_demo 决定这批样本算不算真实依据。"""
+    from ..services.outcomes import import_outcomes
+
+    content = (await file.read()).decode("utf-8-sig", errors="replace")
+    res = import_outcomes(db, content, is_demo=is_demo)
+    if res.get("ok"):
+        record_audit(db, "outcome_import", "selection_outcome", file.filename or "",
+                     after={"created": res["created"], "updated": res["updated"],
+                            "skipped": len(res["skipped"]), "is_demo": is_demo})
+    return res
+
+
+@router.get("/outcomes/report")
+def api_outcomes_report(k: int = 5, db: Session = Depends(get_db)):
+    """命中率报告。样本不足时明确返回 usable=False 并说明原因，不硬算。"""
+    from ..services.outcomes import evaluate
+
+    return evaluate(db, k=max(1, min(k, 50)))
+
