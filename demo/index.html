@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<link rel="icon" href="data:,">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TEMU 全托管选品与客服 Agent</title>
+<link rel="stylesheet" href="./tailwind.css">
+<style>body{font-family:system-ui,"Microsoft YaHei",sans-serif}
+@media (max-width:720px){
+  body>div.flex{flex-direction:column}
+  aside{width:100%!important}
+  #nav{display:flex;flex-wrap:wrap;gap:4px}
+  main{padding:12px!important;max-width:100%!important}
+  table{display:block;overflow-x:auto;white-space:nowrap}
+  .grid{grid-template-columns:1fr!important}
+}</style>
+</head>
+<body class="bg-slate-100 text-slate-800">
+<div style="background:#0f172a;color:#e2e8f0;padding:8px 16px;font-size:13px;line-height:1.6">
+  <b>在线演示 · 只读回放</b>
+  界面与接口响应来自本机真实运行录制（<a style="color:#7dd3fc" href="https://github.com/yanx5433-cmd/temu-agent/blob/main/backend/scripts/capture_demo_snapshot.py">录制脚本</a>），
+  数据为脚本生成的演示数据，<b>未接入 TEMU 官方 API</b>，不写库、不发起外部请求。
+  评分实验台的重排名是前端真算的，与 <code>services/sensitivity.py</code> 同式。
+  <a style="color:#7dd3fc;margin-left:6px" href="https://github.com/yanx5433-cmd/temu-agent">仓库 ↗</a>
+</div>
+<script src="./shim.js"></script>
+<div class="flex min-h-screen">
+  <aside class="w-52 bg-slate-900 text-slate-200 p-4 space-y-1 flex-shrink-0">
+    <h1 class="text-base font-bold mb-4 px-2">🛒 TEMU Agent 后台</h1>
+    <nav id="nav" class="space-y-1 text-sm">
+      <a data-tab="dashboard" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">📊 数据总览</a>
+      <a data-tab="signals" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">📈 今日趋势/信号</a>
+      <a data-tab="candidates" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">🏆 候选商品</a>
+      <a data-tab="compliance" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">✅ 合规检查</a>
+      <a data-tab="basis" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">评分依据</a>
+      <a data-tab="outcomes" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">结果回流</a>
+      <a data-tab="cs" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">💬 客服工作台</a>
+      <a data-tab="knowledge" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">📚 知识库</a>
+      <a data-tab="sources" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">🔌 数据源/TEMU授权</a>
+      <a data-tab="settings" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">⚙️ 规则配置</a>
+      <a data-tab="audit" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">📝 操作审计</a>
+    </nav>
+  </aside>
+  <main class="flex-1 p-6 max-w-6xl">
+    <div id="content"></div>
+  </main>
+</div>
+<script>
+const $ = sel => document.querySelector(sel);
+const api = async (path, opts) => {
+  const r = await fetch('/api'+path, opts ? {headers:{'Content-Type':'application/json'},...opts, body: opts.body?JSON.stringify(opts.body):undefined} : undefined);
+  if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||'请求失败'); }
+  return r.json();
+};
+const badge = (s, map) => { const m = map[s]||['bg-gray-200','']; return `<span class="px-2 py-0.5 rounded text-xs ${m[0]}">${s} ${m[1]||''}</span>`; };
+const REC = {TOP:['bg-green-200','推荐'],CONSIDER:['bg-yellow-200','可考虑'],PENDING:['bg-gray-200','观望'],REJECT:['bg-red-200','禁售']};
+const CHK = {PASS:['bg-green-200','通过'],REVIEW:['bg-yellow-200','待人工'],REJECT:['bg-red-200','拦截']};
+
+function gatePanel(g){
+  const b=(g.blockers||[]).map(x=>'<p class="text-red-700 text-xs">✗ '+x.name+'：'+(x.detail||'')+' → '+x.advice+'</p>').join('');
+  const w=(g.warnings||[]).map(x=>'<p class="text-yellow-700 text-xs">! '+x.name+(x.detail?'：'+x.detail:'')+' → '+x.advice+'</p>').join('');
+  const cls=g.level==='ELIMINATE'?'border-red-500':(g.level==='REVIEW'?'border-yellow-500':'border-green-500');
+  return '<div class="bg-white p-4 rounded shadow text-sm border-l-4 '+cls+'"><h3 class="font-bold mb-2">第 0 关硬门槛：'+g.level+'</h3>'
+    +(b||w||'<p class="text-xs text-gray-500">无拦截项</p>')
+    +'<p class="text-xs text-gray-400 mt-2">阈值状态：'+[...new Set((g.limits_used||[]).map(u=>u.status))].join('/')+'（confirmed 才算已核实）</p></div>';
+}
+function provPanel(sd){
+  const CN={measured:'bg-green-100',default:'bg-orange-100',derived:'bg-blue-100',missing:'bg-red-100'};
+  const chips=Object.entries(sd.provenance).map(([k,v])=>'<span class="px-2 py-0.5 rounded text-xs '+(CN[v.origin]||'bg-gray-100')+'">'+k+'：'+v.label+'</span>').join('');
+  const pct=((sd.measured_ratio||0)*100).toFixed(0);
+  return '<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">字段来源（估的别当成量的）</h3><div class="flex flex-wrap gap-1">'+chips+'</div><p class="text-xs text-gray-500 mt-2">实测占比 '+pct+'%</p></div>';
+}
+
+function render(html){ $('#content').innerHTML = html; }
+function err(e){ render(`<div class="bg-red-100 border border-red-300 text-red-700 p-3 rounded">${e.message||e}</div>`); }
+
+async function showDashboard(){
+  try{
+    const d = await api('/dashboard');
+    render(`<h2 class="text-xl font-bold mb-4">数据总览</h2>
+    <div class="grid grid-cols-3 gap-4 mb-6">
+      <div class="bg-white p-4 rounded shadow"><div class="text-3xl font-bold">${d.signals}</div><div>热度信号</div></div>
+      <div class="bg-white p-4 rounded shadow"><div class="text-3xl font-bold">${d.candidates}</div><div>候选商品</div></div>
+      <div class="bg-white p-4 rounded shadow"><div class="text-3xl font-bold">${d.conversations}</div><div>客服会话</div></div>
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div class="bg-white p-4 rounded shadow"><h3 class="font-bold mb-2">Top 候选</h3>
+        ${d.top_candidates.map(c=>`<div class="flex justify-between py-1 border-b"><span>${c.title}</span><span>${c.score}分 · ${badge(c.recommendation,REC)}</span></div>`).join('')||'<p class="text-sm text-gray-500">请先运行选品</p>'}</div>
+      <div class="bg-white p-4 rounded shadow"><h3 class="font-bold mb-2">最近客服会话</h3>
+        ${d.recent_conversations.map(c=>`<div class="py-1 border-b text-sm">${c.question} — 意图:${c.intent} ${badge(c.risk_level,{high:['bg-red-200'],low:['bg-green-200']})}</div>`).join('')||'<p class="text-sm text-gray-500">暂无</p>'}</div>
+    </div>
+    <p class="mt-4 text-sm text-gray-500">自动化等级：${d.automation_level} · 目标市场：${(d.target_markets||[]).join(', ')}</p>`);
+  }catch(e){err(e)}
+}
+
+async function showSignals(){
+  try{
+    const s = await api('/signals?limit=200');
+    render(`<h2 class="text-xl font-bold mb-4">今日趋势 / 热度信号（共 ${s.total} 条）</h2>
+    <div class="mb-4 flex gap-2">
+      <button onclick="runSelection()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">▶ 运行选品分析</button>
+      <label class="bg-white px-4 py-2 rounded border cursor-pointer">导入 CSV<input type="file" accept=".csv" class="hidden" onchange="importCSV(this)"></label>
+    </div>
+    <table class="w-full bg-white rounded shadow text-sm"><thead class="bg-slate-200"><tr><th class="p-2 text-left">标题</th><th>类目</th><th>来源</th><th>价格</th><th>30日销量</th><th>7日增长</th><th>抓取时间</th></tr></thead><tbody>
+    ${s.items.map(i=>`<tr class="border-t"><td class="p-2">${i.title}</td><td class="text-center">${i.category}</td><td class="text-center">${i.source}</td><td class="text-center">$${i.price??'-'}</td><td class="text-center">${i.sales_signal?.sales_30d??'-'}</td><td class="text-center">${i.sales_signal?.growth_7d!=null?(i.sales_signal.growth_7d*100).toFixed(1)+'%':'-'}</td><td class="text-center text-xs">${(i.captured_at||'').slice(0,10)}</td></tr>`).join('')}
+    </tbody></table>`);
+  }catch(e){err(e)}
+}
+
+async function runSelection(){
+  try{
+    const r = await api('/selection/run',{method:'POST'});
+    alert(`选品完成：评估 ${r.selection.evaluated} 个候选，禁售拦截 ${r.selection.reject}，待人工 ${r.selection.review}，通过 ${r.selection.pass}`);
+    showCandidates();
+  }catch(e){err(e)}
+}
+async function importCSV(input){
+  const fd = new FormData(); fd.append('file', input.files[0]);
+  const r = await fetch('/api/imports/csv',{method:'POST',body:fd});
+  const j = await r.json(); alert(j.ok?`导入成功：新增 ${j.inserted}，跳过 ${j.skipped}`:'导入失败');
+  showSignals();
+}
+
+async function showCandidates(){
+  try{
+    const c = await api('/candidates');
+    render(`<h2 class="text-xl font-bold mb-4">候选商品（共 ${c.total}）</h2>
+    <table class="w-full bg-white rounded shadow text-sm"><thead class="bg-slate-200"><tr><th class="p-2 text-left">商品</th><th>类目</th><th>评分</th><th>置信度</th><th>价格区间</th><th>采购价</th><th>重量</th><th>结果</th><th>操作</th></tr></thead><tbody>
+    ${c.items.map(i=>`<tr class="border-t">
+      <td class="p-2"><a class="text-blue-600 hover:underline" onclick="showCandidate(${i.id})">${i.normalized_title}</a></td>
+      <td class="text-center">${i.category}</td><td class="text-center font-bold">${i.total_score}</td>
+      <td class="text-center">${(i.confidence*100).toFixed(0)}%</td>
+      <td class="text-center">$${i.estimated_price_low??'-'}~$${i.estimated_price_high??'-'}</td>
+      <td class="text-center">$${i.estimated_cost??'-'}</td><td class="text-center">${i.estimated_weight_g??'-'}g</td>
+      <td class="text-center">${badge(i.recommendation,REC)}</td>
+      <td class="text-center">${i.approved?'<span class="text-green-600">已批准</span>':i.recommendation!=='REJECT'?`<button onclick="approveCandidate(${i.id})" class="bg-green-600 text-white text-xs px-2 py-1 rounded">批准</button>`:''}</td>
+    </tr>`).join('')}</tbody></table>`);
+  }catch(e){err(e)}
+}
+async function approveCandidate(id){
+  try{ await api(`/candidates/${id}/approve?approver=admin`,{method:'POST'}); showCandidates(); }catch(e){alert(e.message)}
+}
+
+async function showCandidate(id){
+  try{
+    const c = await api(`/candidates/${id}`);
+    const sd = c.score_detail?.scoring||{};
+    render(`<button onclick="showCandidates()" class="text-blue-600 text-sm mb-4">← 返回列表</button>
+    <h2 class="text-xl font-bold mb-2">${c.normalized_title}</h2>
+    <div class="mb-4 text-sm text-gray-600">类目：${c.category} · 数据来源：${(c.data_sources||[]).join(',')} · 更新：${(c.data_updated_at||'').slice(0,10)} · 竞品快照数：${c.competitor_count}</div>
+    <div class="grid grid-cols-2 gap-4">
+      <div class="bg-white p-4 rounded shadow">
+        <h3 class="font-bold mb-2">评分（综合 ${c.total_score}，置信度 ${(c.confidence*100).toFixed(0)}%）</h3>
+        ${Object.entries(sd).map(([k,v])=>`<div class="mb-2"><div class="flex justify-between text-sm"><span>${{demand:'需求热度',growth:'增长速度',competition:'竞争空间',margin:'预计利润',logistics:'物流友好度',stability:'非季节稳定性'}[k]}</span><span>${v.score} × ${v.weight}</span></div><div class="h-2 bg-slate-200 rounded"><div class="h-2 bg-blue-500 rounded" style="width:${v.score}%"></div></div><div class="text-xs text-gray-500">${v.detail}</div></div>`).join('')}
+      </div>
+      <div class="space-y-4">
+        <div class="bg-white p-4 rounded shadow text-sm">
+          <h3 class="font-bold mb-2">商业概览</h3>
+          <p>价格区间：$${c.estimated_price_low??'-'} ~ $${c.estimated_price_high??'-'}</p>
+          <p>预计采购价：$${c.estimated_cost??'-'} · 预计重量：${c.estimated_weight_g??'-'}g</p>
+          <p>预计毛利率：${c.estimated_margin!=null?(c.estimated_margin*100).toFixed(0)+'%':'数据不足'}</p>
+          <p>季节性：${c.seasonal?'是':'否'}</p>
+          <p>合规：${c.compliance?badge(c.compliance.status,CHK):'未检查'}</p>
+        </div>
+        <div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">推荐原因</h3><ul class="list-disc pl-5">${(c.reasons||[]).map(r=>`<li>${r}</li>`).join('')}</ul></div>
+        <div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">主要风险</h3><ul class="list-disc pl-5 text-red-700">${(c.risks||[]).map(r=>`<li>${r}</li>`).join('')||'<li>无明显风险</li>'}</ul></div>
+        <div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">差异化方向</h3>${c.differentiation}</div>
+        ${c.score_detail && c.score_detail.gate ? gatePanel(c.score_detail.gate) : ''}
+        ${c.score_detail && c.score_detail.provenance ? provPanel(c.score_detail) : ''}
+        ${c.compliance?`<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">合规详情</h3><p>${c.compliance.explanation}</p>${(c.compliance.matched_rules||[]).map(r=>`<p class="text-red-600">命中：${r.rule_name}（${r.hit_pattern}）</p>`).join('')}</div>`:''}
+      </div>
+    </div>`);
+  }catch(e){err(e)}
+}
+
+async function showCompliance(){
+  try{
+    const c = await api('/candidates');
+    render(`<h2 class="text-xl font-bold mb-4">合规检查</h2>
+    <p class="text-sm text-gray-600 mb-4">合规为选品前置门槛。REJECT=硬性禁售，REVIEW=资料不足需人工确认。PASS 仅表示"未发现特定品类的复杂准入要求"，最终需人工确认平台与目标市场法规。</p>
+    <table class="w-full bg-white rounded shadow text-sm"><thead class="bg-slate-200"><tr><th class="p-2 text-left">商品</th><th>结果</th><th>操作</th></tr></thead><tbody>
+    ${c.items.map(i=>`<tr class="border-t"><td class="p-2">${i.normalized_title}</td><td class="text-center">${badge(i.recommendation==='REJECT'?'REJECT':'-',REC)}</td>
+    <td class="text-center"><button onclick="doCompliance(${i.id})" class="bg-blue-600 text-white text-xs px-2 py-1 rounded">重新检查</button>
+    <a onclick="showCandidate(${i.id})" class="text-blue-600 text-xs cursor-pointer">详情</a></td></tr>`).join('')}</tbody></table>`);
+  }catch(e){err(e)}
+}
+async function doCompliance(id){
+  try{ const r = await api(`/candidates/${id}/compliance-check`,{method:'POST'}); alert(`检查完成：${r.status}\n${r.explanation}`); }catch(e){alert(e.message)}
+}
+
+async function showCS(){
+  try{
+    const c = await api('/conversations');
+    render(`<h2 class="text-xl font-bold mb-4">客服工作台</h2>
+    <div class="bg-white p-4 rounded shadow mb-4">
+      <textarea id="q" class="w-full border rounded p-2 text-sm" rows="2" placeholder="输入买家问题（中/英/西）"></textarea>
+      <button onclick="newConv()" class="mt-2 bg-blue-600 text-white px-4 py-2 rounded text-sm">新建会话并生成回复</button>
+    </div>
+    <div class="space-y-2">${c.items.map(i=>`
+      <div class="bg-white p-3 rounded shadow text-sm">
+        <div class="flex justify-between"><span class="font-medium">${i.question}</span>
+        <span>${badge(i.risk_level,{high:['bg-red-200','转人工'],low:['bg-green-200']})} <span class="text-gray-500">${i.intent} · ${i.buyer_language} · ${i.status}</span></span></div>
+        <button onclick="genReply(${i.id})" class="mt-2 text-blue-600 text-xs">生成/查看回复草稿</button>
+        <div id="draft-${i.id}" class="mt-2"></div>
+      </div>`).join('')||'<p class="text-gray-500 text-sm">暂无会话</p>'}</div>`);
+  }catch(e){err(e)}
+}
+async function newConv(){
+  try{
+    const q = $('#q').value.trim(); if(!q) return alert('请输入问题');
+    const conv = await api('/conversations',{method:'POST',body:{question:q}});
+    await genReply(conv.id);
+  }catch(e){err(e)}
+}
+async function genReply(cid){
+  try{
+    const d = await api(`/conversations/${cid}/generate-reply`,{method:'POST'});
+    $(`#draft-${cid}`).innerHTML = `
+      <div class="border rounded p-2 bg-slate-50">
+        <p>回复（置信度 ${(d.confidence*100).toFixed(0)}%）：${d.generated_reply}</p>
+        <p class="text-xs text-gray-500 mt-1">引用来源：${(d.cited_sources||[]).map(s=>s.title||('#'+s.id)).join('、')||'无'}</p>
+        ${d.approval_status==='pending'?`<div class="mt-2 flex gap-2">
+          <textarea id="edit-${d.id}" class="w-full border rounded p-1 text-xs" rows="2">${d.generated_reply}</textarea>
+          <button onclick="approveReply(${d.id})" class="bg-green-600 text-white text-xs px-2 rounded self-start">确认发送</button></div>`
+        :`<p class="text-xs mt-1 ${d.approval_status==='sent'?'text-green-600':'text-gray-500'}">状态：${d.approval_status}</p>`}
+      </div>`;
+  }catch(e){alert(e.message)}
+}
+async function approveReply(rid){
+  try{
+    const text = $(`#edit-${rid}`)?.value;
+    await api(`/replies/${rid}/approve`,{method:'POST',body:{final_reply:text||undefined,approver:'admin'}});
+    await api(`/replies/${rid}/send`,{method:'POST'});
+    alert('已批准并发送（记录审计日志）');
+    showCS();
+  }catch(e){alert(e.message)}
+}
+
+async function showKnowledge(){
+  try{
+    const k = await api('/knowledge');
+    render(`<h2 class="text-xl font-bold mb-4">知识库（${k.total}）</h2>
+    <div class="bg-white p-4 rounded shadow mb-4 grid grid-cols-4 gap-2">
+      <select id="ktype" class="border rounded p-1 text-sm"><option>faq</option><option>policy</option><option>shipping</option><option>product</option></select>
+      <input id="ktitle" class="border rounded p-1 text-sm" placeholder="标题">
+      <input id="kcontent" class="border rounded p-1 text-sm" placeholder="内容（客服回复将原文引用）">
+      <button onclick="addK()" class="bg-blue-600 text-white rounded text-sm">新增</button>
+    </div>
+    <div class="space-y-2">${k.items.map(i=>`<div class="bg-white p-3 rounded shadow text-sm"><span class="font-medium">[${i.type}] ${i.title}</span><p class="text-gray-600">${i.content}</p></div>`).join('')}</div>`);
+  }catch(e){err(e)}
+}
+async function addK(){
+  try{
+    await api('/knowledge',{method:'POST',body:{type:$('#ktype').value,title:$('#ktitle').value,content:$('#kcontent').content?undefined:$('#kcontent').value,keywords:[]}});
+    showKnowledge();
+  }catch(e){alert(e.message)}
+}
+
+async function showSources(){
+  try{
+    const s = await api('/settings/integrations');
+    const t = s.temu;
+    render(`<h2 class="text-xl font-bold mb-4">数据源 / TEMU 授权配置</h2>
+    <div class="bg-white p-4 rounded shadow mb-4 text-sm">
+      <h3 class="font-bold mb-2">当前 TEMU 接入方式：${t.adapter}</h3>
+      <p class="text-yellow-700 bg-yellow-50 p-2 rounded mb-2">${t.note}</p>
+      <pre class="bg-slate-900 text-green-300 p-3 rounded text-xs overflow-auto">${JSON.stringify(t.capabilities,null,2)}</pre>
+    </div>
+    <div class="bg-white p-4 rounded shadow text-sm">
+      <h3 class="font-bold mb-2">切换接入方式</h3>
+      <div class="grid grid-cols-4 gap-2 items-center">
+        <select id="adapter" class="border rounded p-1"><option value="mock">mock（演示）</option><option value="csv">csv</option><option value="manual">manual（人工）</option><option value="official">official（官方API）</option></select>
+        <input id="ak" class="border rounded p-1" placeholder="App Key（official 必填）">
+        <input id="as" type="password" class="border rounded p-1" placeholder="App Secret（official 必填）">
+        <button onclick="saveTemu()" class="bg-blue-600 text-white rounded p-1">保存并授权</button>
+      </div>
+      <p class="text-xs text-gray-500 mt-2">密钥加密保存，日志不输出。未获官方开放能力前请勿选择 official。</p>
+    </div>`);
+  }catch(e){err(e)}
+}
+async function saveTemu(){
+  try{
+    const r = await api('/settings/integrations/temu',{method:'POST',body:{adapter:$('#adapter').value,app_key:$('#ak').value||null,app_secret:$('#as').value||null}});
+    alert('已保存：'+JSON.stringify(r.capabilities||{})); showSources();
+  }catch(e){alert(e.message)}
+}
+
+async function showSettings(){
+  try{
+    const s = await api('/settings');
+    const w = s.score_weights;
+    render(`<h2 class="text-xl font-bold mb-4">规则配置</h2>
+    <div class="bg-white p-4 rounded shadow mb-4">
+      <h3 class="font-bold mb-2">评分权重（总和必须为 1）</h3>
+      <div class="grid grid-cols-3 gap-3 text-sm">
+        ${Object.entries(w).map(([k,v])=>`<label>${{demand:'需求热度',growth:'增长速度',competition:'竞争空间',margin:'预计利润',logistics:'物流友好度',stability:'非季节稳定性'}[k]}<input id="w-${k}" type="number" step="0.05" min="0" max="1" value="${v}" class="border rounded p-1 w-full"></label>`).join('')}
+      </div>
+      <button onclick="saveWeights()" class="mt-3 bg-blue-600 text-white px-3 py-1 rounded text-sm">保存权重</button>
+    </div>
+    <div class="bg-white p-4 rounded shadow text-sm space-y-3">
+      <h3 class="font-bold">目标市场（逗号分隔）</h3>
+      <input id="markets" class="border rounded p-1 w-64" value="${(s.target_markets||[]).join(',')}"}>
+      <h3 class="font-bold">客服自动化等级</h3>
+      <select id="autolevel" class="border rounded p-1">
+        ${['L0','L1','L2','L3'].map(l=>`<option ${l===s.automation_level?'selected':''}>${l}</option>`).join('')}
+      </select>
+      <p class="text-xs text-gray-500">L0 仅草稿 / L1 人工确认后发送 / L2 低风险FAQ自动 / L3 高风险永不自动</p>
+      <label class="block"><input id="autoreply" type="checkbox" ${s.auto_reply_enabled?'checked':''}> 启用 L2 自动回复总开关</label>
+      <button onclick="saveOther()" class="bg-blue-600 text-white px-3 py-1 rounded">保存</button>
+    </div>`);
+  }catch(e){err(e)}
+}
+async function saveWeights(){
+  try{
+    const body={}; for(const k of ['demand','growth','competition','margin','logistics','stability']) body[k]=parseFloat($(`#w-${k}`).value);
+    await api('/settings',{method:'POST',body:{score_weights:body}}); alert('已保存');
+  }catch(e){alert(e.message)}
+}
+async function saveOther(){
+  try{
+    await api('/settings',{method:'POST',body:{target_markets:$('#markets').value.split(',').map(s=>s.trim()).filter(Boolean),automation_level:$('#autolevel').value,auto_reply_enabled:$('#autoreply').checked}});
+    alert('已保存'); 
+  }catch(e){alert(e.message)}
+}
+
+async function showAudit(){
+  try{
+    const a = await api('/audit-events?limit=100');
+    render(`<h2 class="text-xl font-bold mb-4">操作审计（最近 ${a.total} 条）</h2>
+    <table class="w-full bg-white rounded shadow text-sm"><thead class="bg-slate-200"><tr><th class="p-2">时间</th><th>操作者</th><th>动作</th><th>对象</th><th>内容</th></tr></thead><tbody>
+    ${a.items.map(i=>`<tr class="border-t"><td class="p-2 text-xs">${i.created_at.slice(0,19)}</td><td class="text-center">${i.actor}</td><td class="text-center">${i.action}</td><td class="text-center">${i.object_type}#${i.object_id}</td><td class="text-xs text-gray-600">${JSON.stringify(i.after_data).slice(0,120)}</td></tr>`).join('')}</tbody></table>`);
+  }catch(e){err(e)}
+}
+
+
+async function showBasis(){
+  try{
+    const [ahp,sens]=await Promise.all([api('/scoring/weights-derivation'),api('/scoring/sensitivity?trials=400&k=5')]);
+    const rows=Object.entries(ahp.weights).map(([k,v])=>
+      '<tr class="border-t"><td class="p-1">'+(ahp.dim_names[k]||k)+'</td><td class="text-center font-mono">'+v+'</td></tr>').join('');
+    const sliders=Object.entries(ahp.weights).map(([k,v])=>
+      '<label class="text-xs">'+(ahp.dim_names[k]||k)+'<input id="s-'+k+'" type="range" min="0" max="1" step="0.01" value="'+v+'" class="w-full" oninput="liveW()"><span id="v-'+k+'" class="font-mono">'+v+'</span></label>').join('');
+    render('<h2 class="text-xl font-bold mb-1">评分依据与稳健性</h2>'
+      +'<p class="text-sm text-gray-600 mb-4">回答两个问题：权重是怎么来的；换一组差不多合理的权重后名单还稳吗。</p>'
+      +'<div class="bg-amber-50 border border-amber-300 rounded p-3 mb-4 text-sm text-amber-900"><b>先说结论：</b>'+sens.verdict+'<br><span class="text-xs">'+sens.warning+'</span></div>'
+      +'<div class="grid grid-cols-2 gap-4">'
+      +'<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">权重来源：AHP 两两比较</h3>'
+      +'<p class="text-xs text-gray-600 mb-2">'+ahp.method+'</p>'
+      +'<table class="w-full text-xs mb-2"><thead class="bg-slate-100"><tr><th class="p-1 text-left">维度</th><th>权重</th></tr></thead><tbody>'+rows+'</tbody></table>'
+      +'<p class="text-xs">一致性比率 <b class="'+(ahp.consistent?'text-green-700':'text-red-700')+'">CR='+ahp.consistency_ratio+'</b>（阈值 0.10）· lambda max='+ahp.lambda_max+'</p>'
+      +'<p class="text-xs text-gray-500 mt-1">'+ahp.verdict+'</p>'
+      +'<p class="text-xs text-red-700 mt-2">'+ahp.caveat+'</p></div>'
+      +'<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">权重扰动 '+sens.trials+' 次（±'+(sens.band*100).toFixed(0)+'%，种子 '+sens.seed+'）</h3>'
+      +'<p>平均 Spearman：<b>'+sens.mean_spearman+'</b>（最低 '+sens.min_spearman+'）</p>'
+      +'<p>平均 Kendall tau：<b>'+sens.mean_kendall+'</b></p>'
+      +'<p>TOP-'+sens.k+' 重合度：<b>'+sens.mean_topk_jaccard+'</b></p>'
+      +'<p class="text-xs text-gray-500 mt-2">始终在 TOP-'+sens.k+'：'+((sens.stable_top_members||[]).join('、')||'无')+'</p>'
+      +'<p class="text-xs text-gray-500">会摇摆的：'+((sens.flip_flopping||[]).length?sens.flip_flopping.map(f=>f.label+'('+(f.top_rate*100).toFixed(0)+'%)').join('、'):'无（说明当前数据几乎没有真正的维度权衡）')+'</p></div></div>'
+      +'<div class="bg-white p-4 rounded shadow mt-4 text-sm"><h3 class="font-bold mb-2">权重实验台（只预览，不保存）</h3>'
+      +'<div class="grid grid-cols-3 gap-3 mb-3">'+sliders+'</div>'
+      +'<button onclick="runWhatIf()" class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm">重排名</button>'
+      +'<div id="whatif-out" class="mt-3"></div></div>');
+    window._ahpWeights = ahp.weights;
+  }catch(e){err(e)}
+}
+function liveW(){ Object.keys(window._ahpWeights||{}).forEach(k=>{ const el=document.querySelector('#s-'+k), lab=document.querySelector('#v-'+k); if(el&&lab) lab.textContent=el.value; }); }
+
+
+async function runWhatIf(){
+  const w={}; Object.keys(window._ahpWeights||{}).forEach(k=>{w[k]=parseFloat(document.querySelector('#s-'+k).value);});
+  const sum=Object.values(w).reduce((a,b)=>a+b,0);
+  const out=document.querySelector('#whatif-out');
+  if(Math.abs(sum-1)>0.001){ out.innerHTML='<p class="text-red-600 text-sm">权重之和必须为 1，当前 '+sum.toFixed(3)+'</p>'; return; }
+  try{
+    const r=await api('/scoring/whatif',{method:'POST',body:{weights:w,k:5}});
+    const tr=r.items.map(i=>'<tr class="border-t"><td class="p-1">#'+i.rank+'</td><td>'+i.title+'</td><td class="text-center '+(i.old_rank!==i.rank?'text-red-600 font-bold':'')+'">#'+i.old_rank+'</td><td class="text-center font-mono">'+i.new_score+'</td></tr>').join('');
+    out.innerHTML='<p class="text-xs mb-2">名次变动 <b>'+r.ranks_moved+'/'+r.total_candidates+'</b>；TOP-5 换人：'+(r.top_set_changed.length?r.top_set_changed.join('、'):'无')+'</p>'
+      +'<table class="w-full text-xs"><thead class="bg-slate-100"><tr><th class="p-1 text-left">新名次</th><th class="text-left">商品</th><th>旧名次</th><th>新总分</th></tr></thead><tbody>'+tr+'</tbody></table>';
+  }catch(e){ out.innerHTML='<p class="text-red-600 text-sm">'+e.message+'</p>'; }
+}
+async function showOutcomes(){
+  try{
+    const rep=await api('/outcomes/report?k=5');
+    let body;
+    if(rep.usable){
+      const eff=Object.entries(rep.dimension_effect_size).map(([k,v])=>'<tr class="border-t"><td class="p-1">'+k+'</td><td class="text-center font-mono">'+(v===null?'样本不足':((v>0?'+':'')+v))+'</td></tr>').join('');
+      body='<p class="mt-2">precision@'+rep.precision_at_k.k+'：<b>'+rep.precision_at_k.value+'</b>（'+rep.precision_at_k.hits+'/'+rep.precision_at_k.k+'）</p>'
+        +'<p>推荐组 vs 其他组动销率差：<b>'+rep.lift.value+'</b>（'+rep.lift.top_group_sold_rate+' vs '+rep.lift.other_group_sold_rate+'）</p>'
+        +'<h4 class="font-bold mt-3 mb-1">各分项对动销的区分力（效应量）</h4><table class="w-full text-xs"><tbody>'+eff+'</tbody></table>'
+        +'<p class="text-xs text-gray-600 mt-2">'+rep.dimension_read+'</p>';
+    } else {
+      body='<p class="mt-2 text-orange-800 bg-orange-50 border border-orange-200 rounded p-2 text-xs"><b>不给结论：</b>'+rep.reason+'</p>'
+        +(rep.descriptive?'<p class="text-xs text-gray-500 mt-1">仅描述性：动销率 '+rep.descriptive.sold_rate+'，平均 30 日销量 '+rep.descriptive.avg_sales_30d+'</p>':'');
+    }
+    render('<h2 class="text-xl font-bold mb-1">结果回流与命中率</h2>'
+      +'<p class="text-sm text-gray-600 mb-4">AHP 只能保证判断自洽，不能保证判断正确。要验证有效性，必须有当初推荐与后来动销的配对样本。</p>'
+      +'<div class="bg-white p-4 rounded shadow text-sm mb-4"><h3 class="font-bold mb-2">导入配对结果 CSV</h3>'
+      +'<p class="text-xs text-gray-500 mb-2">列：candidate_id 或 external_id，listed，sold，sales_30d，note</p>'
+      +'<input type="file" id="ofile" accept=".csv" class="text-xs" onchange="importOutcomes(this)"></div>'
+      +'<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">命中率报告</h3>'
+      +'<p>配对样本：<b>'+rep.paired_samples+'</b> 条（最低要求 '+rep.min_samples+' 条）'+(rep.demo_only===true?' · <span class="text-orange-700">当前全部为演示样本</span>':'')+'</p>'+body+'</div>');
+  }catch(e){err(e)}
+}
+async function importOutcomes(input){
+  const f=input.files[0]; if(!f) return;
+  const fd=new FormData(); fd.append('file',f);
+  try{
+    const r=await fetch('/api/outcomes/import?is_demo=true',{method:'POST',body:fd});
+    const d=await r.json();
+    alert(d.ok?('导入完成：新增 '+d.created+'，更新 '+d.updated+'，跳过 '+d.skipped.length):('失败：'+d.error));
+    showOutcomes();
+  }catch(e){alert(e.message)}
+}
+
+const TABS = {dashboard:showDashboard,signals:showSignals,candidates:showCandidates,compliance:showCompliance,cs:showCS,knowledge:showKnowledge,sources:showSources,settings:showSettings,audit:showAudit,basis:showBasis,outcomes:showOutcomes};
+document.querySelectorAll('#nav a').forEach(a=>a.onclick=()=>{
+  document.querySelectorAll('#nav a').forEach(x=>x.classList.remove('bg-slate-700'));
+  a.classList.add('bg-slate-700');
+  TABS[a.dataset.tab]();
+});
+const _h = (location.hash||'').replace('#','');
+if (_h.startsWith('candidate/')) { showCandidate(parseInt(_h.split('/')[1],10)); }
+else { (_h && TABS[_h] ? document.querySelector('#nav a[data-tab="'+_h+'"]') : document.querySelector('#nav a')).click(); }
+</script>
+</body>
+</html>
