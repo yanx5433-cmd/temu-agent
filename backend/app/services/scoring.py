@@ -6,6 +6,10 @@ import math
 
 from ..appsettings import get_setting
 from .compliance import check_compliance
+from .gate import evaluate_gate
+
+_PROV_CN = {"measured": "数据实测", "default": "类目默认值（拍的）",
+            "derived": "由售价推导", "missing": "缺失"}
 
 
 def _norm_title(title: str) -> str:
@@ -19,17 +23,63 @@ def _norm_title(title: str) -> str:
 
 
 def estimate_fields(signal_row: dict, category_defaults: dict) -> dict:
-    """从 signal 原始字段 + 类目默认值估计成本/重量/价格区间。"""
+    """从 signal 原始字段 + 类目默认值估计成本/重量/价格区间。
+
+    同时输出 _provenance：每个字段到底是
+      measured  数据里带的（相对可信）
+      default   类目默认值兜的（拍脑袋，只能当占位）
+      derived   由价格乘系数推出来的
+      missing   压根没有
+    没有这层标注时，"成本 0.8" 和"成本 0.8（其实是类目平均值）"在界面上长得一样，
+    看的人会把估的当成量的——这是选品系统最容易骗自己的地方。
+    """
     cat = signal_row.get("category", "default")
     defaults = category_defaults.get(cat, category_defaults.get("default", {}))
     price = signal_row.get("price")
     raw = signal_row.get("raw_data", {}) or {}
-    cost = raw.get("cost", defaults.get("cost"))
-    weight = raw.get("weight_g", defaults.get("weight_g"))
+
+    prov: dict[str, str] = {}
+
+    if "cost" in raw and raw["cost"] not in (None, "", 0):
+        cost, prov["cost"] = raw["cost"], "measured"
+    elif defaults.get("cost") is not None:
+        cost, prov["cost"] = defaults["cost"], "default"
+    else:
+        cost, prov["cost"] = None, "missing"
+
+    if "weight_g" in raw and raw["weight_g"] is not None:
+        weight, prov["weight_g"] = raw["weight_g"], "measured"
+    elif defaults.get("weight_g") is not None:
+        weight, prov["weight_g"] = defaults["weight_g"], "default"
+    else:
+        weight, prov["weight_g"] = None, "missing"
+
     size = raw.get("size")
     material = raw.get("material")
-    price_low = raw.get("price_low") or (round(price * 0.85, 2) if price else None)
-    price_high = raw.get("price_high") or (round(price * 1.25, 2) if price else None)
+    prov["size"] = "measured" if size else "missing"
+    prov["material"] = "measured" if material else "missing"
+
+    if raw.get("price_low") is not None:
+        price_low, prov["price_low"] = raw["price_low"], "measured"
+    elif price:
+        price_low, prov["price_low"] = round(price * 0.85, 2), "derived"
+    else:
+        price_low, prov["price_low"] = None, "missing"
+
+    if raw.get("price_high") is not None:
+        price_high, prov["price_high"] = raw["price_high"], "measured"
+    elif price:
+        price_high, prov["price_high"] = round(price * 1.25, 2), "derived"
+    else:
+        price_high, prov["price_high"] = None, "missing"
+
+    if "seasonal" in raw:
+        seasonal, prov["seasonal"] = bool(raw["seasonal"]), "measured"
+    elif "seasonal" in defaults:
+        seasonal, prov["seasonal"] = bool(defaults["seasonal"]), "default"
+    else:
+        seasonal, prov["seasonal"] = False, "missing"
+
     return {
         "cost": cost,
         "weight_g": weight,
@@ -37,7 +87,8 @@ def estimate_fields(signal_row: dict, category_defaults: dict) -> dict:
         "material": material,
         "price_low": price_low,
         "price_high": price_high,
-        "seasonal": bool(raw.get("seasonal", defaults.get("seasonal", False))),
+        "seasonal": seasonal,
+        "_provenance": prov,
     }
 
 
@@ -188,7 +239,10 @@ def build_reasons(candidate, scores: dict) -> tuple[list, list, str]:
 
 
 def run_selection_for_candidate(db, candidate, weights=None, category_defaults=None) -> dict:
-    """对单个候选执行：合规门槛 → 评分 → 理由。合规 REJECT 直接淘汰不打分。"""
+    """对单个候选执行：禁售合规 → 硬门槛 → 评分 → 理由。
+
+    前两道关任一不过就直接淘汰，不进打分——高分不该买通门槛。
+    """
     from ..models import ProductSignal
 
     weights = weights or get_setting(db, "score_weights")
@@ -196,10 +250,11 @@ def run_selection_for_candidate(db, candidate, weights=None, category_defaults=N
     market = (get_setting(db, "target_markets") or ["US"])[0]
 
     compliance = check_compliance(candidate, market)
-    if compliance["status"] == "REJECT":
+    gate = evaluate_gate(candidate, get_setting(db, "gate_limits"))
+    if compliance["status"] == "REJECT" or gate["level"] == "ELIMINATE":
         candidate.recommendation = "REJECT"
-        candidate.score_detail = {"compliance": compliance}
-        return {"compliance": compliance, "scores": None}
+        candidate.score_detail = {"compliance": compliance, "gate": gate, "market": market}
+        return {"compliance": compliance, "gate": gate, "scores": None}
 
     sig_rows = (
         db.query(ProductSignal)
@@ -220,6 +275,19 @@ def run_selection_for_candidate(db, candidate, weights=None, category_defaults=N
     result = compute_scores(candidate, signals, weights, category_defaults)
     reasons, risks, diff = build_reasons(candidate, result)
 
+    provenance = (getattr(candidate, "raw_data", None) or {}).get("_provenance") or {}
+    sources = sorted({s.source for s in sig_rows}) if sig_rows else []
+    # 字段来源 × 数据源 组合成人能看懂的一句话：
+    # "成本=类目默认值 · 演示数据" 和 "成本=数据实测 · CSV 导入" 可信度完全不是一回事
+    prov_view = {
+        k: {"origin": v, "data_source": sources or ["none"],
+            "label": _PROV_CN.get(v, v)}
+        for k, v in provenance.items()
+    }
+    measured_ratio = round(
+        sum(1 for v in provenance.values() if v == "measured") / len(provenance), 2
+    ) if provenance else None
+
     for k, v in result["scores"].items():
         setattr(candidate, k, v)
     candidate.total_score = result["total_score"]
@@ -228,13 +296,22 @@ def run_selection_for_candidate(db, candidate, weights=None, category_defaults=N
     candidate.reasons = reasons
     candidate.risks = risks
     candidate.differentiation = diff
-    candidate.score_detail = {"compliance": compliance, "scoring": result["detail"], "market": market}
-    candidate.recommendation = (
+    candidate.score_detail = {
+        "compliance": compliance, "scoring": result["detail"], "market": market,
+        "gate": gate, "provenance": prov_view, "measured_ratio": measured_ratio,
+    }
+    rec = (
         "TOP" if result["total_score"] >= 65 and result["confidence"] >= 0.6
         else "CONSIDER" if result["total_score"] >= 50
         else "PENDING"
     )
-    return {"compliance": compliance, "scores": result}
+    # 门槛只给 REVIEW 时，不允许出现 TOP——有未核实项就不该算"直接可推"
+    if gate["level"] == "REVIEW" and rec == "TOP":
+        rec = "CONSIDER"
+        risks = list(risks) + [f"硬门槛有 {len(gate['warnings'])} 项待人工确认，暂不给 TOP 推荐"]
+        candidate.risks = risks
+    candidate.recommendation = rec
+    return {"compliance": compliance, "gate": gate, "scores": result}
 
 
 def _cluster_key_of(candidate) -> str:

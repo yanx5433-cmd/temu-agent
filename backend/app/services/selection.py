@@ -37,7 +37,10 @@ def build_candidates_from_signals(db: Session) -> dict:
         candidate.estimated_weight_g = est["weight_g"]
         candidate.seasonal = est["seasonal"]
         # raw 字段挂到 candidate 上供合规缺失检查（size/material 等）
-        candidate.raw_data = {"size": est["size"], "material": est["material"], **(rep.raw_data or {})}
+        # _provenance 记录每个字段是实测还是兜底，供详情页标徽章
+        candidate.raw_data = {"size": est["size"], "material": est["material"],
+                              "_provenance": est["_provenance"],
+                              **(rep.raw_data or {})}
     db.commit()
     return {"created": created, "updated": updated}
 

@@ -19,8 +19,14 @@ DEFAULT_SETTINGS = {
     "target_markets": ["US"],
     "automation_level": "L1",
     "auto_reply_enabled": False,
+    # 第 0 关硬门槛的阈值覆盖。留空 = 用 gate.DEFAULT_LIMITS 里的默认值，
+    # 而那些默认值全部标着 to_verify —— 上线前必须换成从平台规则/卖家后台核实过的数字。
+    "gate_limits": {},
     "category_defaults": {
-        # 各类目的默认采购成本(USD)、默认重量(g)、季节性标记
+        # 各类目的默认采购成本(USD)、默认重量(g)、季节性标记。
+        # 注意：这些是**拍的占位值**，不是实测。用了它们的字段会被标成
+        # provenance=default，在详情页显示为"类目默认值（拍的）"，
+        # 免得看的人把兜底值当成真实报价。
         "diy_party": {"cost": 1.2, "weight_g": 120, "seasonal": True},
         "hair_accessories": {"cost": 0.8, "weight_g": 40, "seasonal": False},
         "home_storage": {"cost": 2.5, "weight_g": 400, "seasonal": False},
