@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: temu_agent
+      POSTGRES_USER: temu
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-temu_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temu"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://temu:${POSTGRES_PASSWORD:-temu_dev_password}@db:5432/temu_agent
+      REDIS_URL: redis://redis:6379/0
+      TEMU_ADAPTER: mock
+      LLM_PROVIDER: ${LLM_PROVIDER:-rule}
+      LLM_API_BASE: ${LLM_API_BASE:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      DEFAULT_AUTOMATION_LEVEL: L1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head || python -c 'import app.main';
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  pgdata:
