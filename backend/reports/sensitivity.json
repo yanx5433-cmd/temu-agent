@@ -1,0 +1,155 @@
+{
+  "sensitivity": {
+    "n_candidates": 21,
+    "k": 5,
+    "trials": 1000,
+    "band": 0.2,
+    "seed": 20261017,
+    "mean_spearman": 0.9973,
+    "mean_kendall": 0.9822,
+    "mean_topk_jaccard": 1.0,
+    "min_spearman": 0.9922,
+    "stable_top_members": [
+      "adult shark claw hair ",
+      "成人鲨鱼夹粗发抓夹",
+      "成人韩式珍珠发夹套装",
+      "手账和纸胶带套装",
+      "园艺植物绑扎固定夹50个"
+    ],
+    "flip_flopping": [],
+    "lost_from_top": [],
+    "top_rate_table": [
+      {
+        "label": "adult shark claw hair ",
+        "score": 92.9,
+        "top_rate": 1.0
+      },
+      {
+        "label": "成人鲨鱼夹粗发抓夹",
+        "score": 88.5,
+        "top_rate": 1.0
+      },
+      {
+        "label": "成人韩式珍珠发夹套装",
+        "score": 87.9,
+        "top_rate": 1.0
+      },
+      {
+        "label": "手账和纸胶带套装",
+        "score": 87.1,
+        "top_rate": 1.0
+      },
+      {
+        "label": "园艺植物绑扎固定夹50个",
+        "score": 86.2,
+        "top_rate": 1.0
+      },
+      {
+        "label": "百叶窗除尘刷",
+        "score": 85.0,
+        "top_rate": 0.0
+      },
+      {
+        "label": "成人宽边布艺发带",
+        "score": 84.9,
+        "top_rate": 0.0
+      },
+      {
+        "label": "缝隙清洁刷组硬毛软毛",
+        "score": 83.8,
+        "top_rate": 0.0
+      },
+      {
+        "label": "diy 手工流苏挂饰材料包",
+        "score": 81.4,
+        "top_rate": 0.0
+      },
+      {
+        "label": "派对铝膜数字气球替代纸拉旗套装",
+        "score": 79.0,
+        "top_rate": 0.0
+      },
+      {
+        "label": "维生素便携药盒",
+        "score": 78.9,
+        "top_rate": 0.0
+      },
+      {
+        "label": "抽屉分隔收纳盒三件套",
+        "score": 76.2,
+        "top_rate": 0.0
+      },
+      {
+        "label": "缝纫手工针线盒套装含顶针",
+        "score": 76.0,
+        "top_rate": 0.0
+      },
+      {
+        "label": "可重复使用除尘粘尘垫",
+        "score": 75.8,
+        "top_rate": 0.0
+      },
+      {
+        "label": "生日派对装饰彩纸扇花套装",
+        "score": 72.0,
+        "top_rate": 0.0
+      },
+      {
+        "label": "多肉植物移栽小铲三件套",
+        "score": 71.9,
+        "top_rate": 0.0
+      },
+      {
+        "label": "桌面化妆品收纳盒无盖",
+        "score": 0.0,
+        "top_rate": 0.0
+      },
+      {
+        "label": "儿童卡通拼图玩具100片",
+        "score": 0.0,
+        "top_rate": 0.0
+      },
+      {
+        "label": "usb充电迷你台灯",
+        "score": 0.0,
+        "top_rate": 0.0
+      },
+      {
+        "label": "玻璃喷雾瓶清洁剂套装",
+        "score": 0.0,
+        "top_rate": 0.0
+      },
+      {
+        "label": "漫威联名卡通徽章套装",
+        "score": 0.0,
+        "top_rate": 0.0
+      }
+    ],
+    "verdict": "排序稳健（TOP-5 重合度 100%，Spearman 0.997）：权重在小范围内摆动不改变结论"
+  },
+  "weight_comparison": {
+    "spearman": 0.9831,
+    "kendall": 0.9333,
+    "topk_jaccard": 1.0,
+    "candidates_moved": 10,
+    "total": 21,
+    "new_entrants_to_top": [],
+    "dropped_from_top": []
+  },
+  "weights_handset": {
+    "demand": 0.3,
+    "growth": 0.2,
+    "competition": 0.15,
+    "margin": 0.15,
+    "logistics": 0.1,
+    "stability": 0.1
+  },
+  "weights_ahp": {
+    "margin": 0.343,
+    "competition": 0.205,
+    "demand": 0.192,
+    "growth": 0.07,
+    "logistics": 0.106,
+    "stability": 0.084
+  }
+}
