@@ -402,8 +402,9 @@ document.querySelectorAll('#nav a').forEach(a=>a.onclick=()=>{
   a.classList.add('bg-slate-700');
   TABS[a.dataset.tab]();
 });
-const _tab = (location.hash||'').replace('#','');
-(_tab && TABS[_tab] ? document.querySelector('#nav a[data-tab="'+_tab+'"]') : document.querySelector('#nav a')).click();
+const _h = (location.hash||'').replace('#','');
+if (_h.startsWith('candidate/')) { showCandidate(parseInt(_h.split('/')[1],10)); }
+else { (_h && TABS[_h] ? document.querySelector('#nav a[data-tab="'+_h+'"]') : document.querySelector('#nav a')).click(); }
 </script>
 </body>
 </html>
