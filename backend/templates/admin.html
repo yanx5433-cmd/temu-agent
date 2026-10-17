@@ -16,6 +16,8 @@
       <a data-tab="signals" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">📈 今日趋势/信号</a>
       <a data-tab="candidates" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">🏆 候选商品</a>
       <a data-tab="compliance" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">✅ 合规检查</a>
+      <a data-tab="basis" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">评分依据</a>
+      <a data-tab="outcomes" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">结果回流</a>
       <a data-tab="cs" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">💬 客服工作台</a>
       <a data-tab="knowledge" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">📚 知识库</a>
       <a data-tab="sources" class="block px-3 py-2 rounded hover:bg-slate-700 cursor-pointer">🔌 数据源/TEMU授权</a>
@@ -37,6 +39,21 @@ const api = async (path, opts) => {
 const badge = (s, map) => { const m = map[s]||['bg-gray-200','']; return `<span class="px-2 py-0.5 rounded text-xs ${m[0]}">${s} ${m[1]||''}</span>`; };
 const REC = {TOP:['bg-green-200','推荐'],CONSIDER:['bg-yellow-200','可考虑'],PENDING:['bg-gray-200','观望'],REJECT:['bg-red-200','禁售']};
 const CHK = {PASS:['bg-green-200','通过'],REVIEW:['bg-yellow-200','待人工'],REJECT:['bg-red-200','拦截']};
+
+function gatePanel(g){
+  const b=(g.blockers||[]).map(x=>'<p class="text-red-700 text-xs">✗ '+x.name+'：'+(x.detail||'')+' → '+x.advice+'</p>').join('');
+  const w=(g.warnings||[]).map(x=>'<p class="text-yellow-700 text-xs">! '+x.name+(x.detail?'：'+x.detail:'')+' → '+x.advice+'</p>').join('');
+  const cls=g.level==='ELIMINATE'?'border-red-500':(g.level==='REVIEW'?'border-yellow-500':'border-green-500');
+  return '<div class="bg-white p-4 rounded shadow text-sm border-l-4 '+cls+'"><h3 class="font-bold mb-2">第 0 关硬门槛：'+g.level+'</h3>'
+    +(b||w||'<p class="text-xs text-gray-500">无拦截项</p>')
+    +'<p class="text-xs text-gray-400 mt-2">阈值状态：'+[...new Set((g.limits_used||[]).map(u=>u.status))].join('/')+'（confirmed 才算已核实）</p></div>';
+}
+function provPanel(sd){
+  const CN={measured:'bg-green-100',default:'bg-orange-100',derived:'bg-blue-100',missing:'bg-red-100'};
+  const chips=Object.entries(sd.provenance).map(([k,v])=>'<span class="px-2 py-0.5 rounded text-xs '+(CN[v.origin]||'bg-gray-100')+'">'+k+'：'+v.label+'</span>').join('');
+  const pct=((sd.measured_ratio||0)*100).toFixed(0);
+  return '<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">字段来源（估的别当成量的）</h3><div class="flex flex-wrap gap-1">'+chips+'</div><p class="text-xs text-gray-500 mt-2">实测占比 '+pct+'%</p></div>';
+}
 
 function render(html){ $('#content').innerHTML = html; }
 function err(e){ render(`<div class="bg-red-100 border border-red-300 text-red-700 p-3 rounded">${e.message||e}</div>`); }
@@ -132,6 +149,8 @@ async function showCandidate(id){
         <div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">推荐原因</h3><ul class="list-disc pl-5">${(c.reasons||[]).map(r=>`<li>${r}</li>`).join('')}</ul></div>
         <div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">主要风险</h3><ul class="list-disc pl-5 text-red-700">${(c.risks||[]).map(r=>`<li>${r}</li>`).join('')||'<li>无明显风险</li>'}</ul></div>
         <div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">差异化方向</h3>${c.differentiation}</div>
+        ${c.score_detail && c.score_detail.gate ? gatePanel(c.score_detail.gate) : ''}
+        ${c.score_detail && c.score_detail.provenance ? provPanel(c.score_detail) : ''}
         ${c.compliance?`<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">合规详情</h3><p>${c.compliance.explanation}</p>${(c.compliance.matched_rules||[]).map(r=>`<p class="text-red-600">命中：${r.rule_name}（${r.hit_pattern}）</p>`).join('')}</div>`:''}
       </div>
     </div>`);
@@ -297,13 +316,94 @@ async function showAudit(){
   }catch(e){err(e)}
 }
 
-const TABS = {dashboard:showDashboard,signals:showSignals,candidates:showCandidates,compliance:showCompliance,cs:showCS,knowledge:showKnowledge,sources:showSources,settings:showSettings,audit:showAudit};
+
+async function showBasis(){
+  try{
+    const [ahp,sens]=await Promise.all([api('/scoring/weights-derivation'),api('/scoring/sensitivity?trials=400&k=5')]);
+    const rows=Object.entries(ahp.weights).map(([k,v])=>
+      '<tr class="border-t"><td class="p-1">'+(ahp.dim_names[k]||k)+'</td><td class="text-center font-mono">'+v+'</td></tr>').join('');
+    const sliders=Object.entries(ahp.weights).map(([k,v])=>
+      '<label class="text-xs">'+(ahp.dim_names[k]||k)+'<input id="s-'+k+'" type="range" min="0" max="1" step="0.01" value="'+v+'" class="w-full" oninput="liveW()"><span id="v-'+k+'" class="font-mono">'+v+'</span></label>').join('');
+    render('<h2 class="text-xl font-bold mb-1">评分依据与稳健性</h2>'
+      +'<p class="text-sm text-gray-600 mb-4">回答两个问题：权重是怎么来的；换一组差不多合理的权重后名单还稳吗。</p>'
+      +'<div class="bg-amber-50 border border-amber-300 rounded p-3 mb-4 text-sm text-amber-900"><b>先说结论：</b>'+sens.verdict+'<br><span class="text-xs">'+sens.warning+'</span></div>'
+      +'<div class="grid grid-cols-2 gap-4">'
+      +'<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">权重来源：AHP 两两比较</h3>'
+      +'<p class="text-xs text-gray-600 mb-2">'+ahp.method+'</p>'
+      +'<table class="w-full text-xs mb-2"><thead class="bg-slate-100"><tr><th class="p-1 text-left">维度</th><th>权重</th></tr></thead><tbody>'+rows+'</tbody></table>'
+      +'<p class="text-xs">一致性比率 <b class="'+(ahp.consistent?'text-green-700':'text-red-700')+'">CR='+ahp.consistency_ratio+'</b>（阈值 0.10）· lambda max='+ahp.lambda_max+'</p>'
+      +'<p class="text-xs text-gray-500 mt-1">'+ahp.verdict+'</p>'
+      +'<p class="text-xs text-red-700 mt-2">'+ahp.caveat+'</p></div>'
+      +'<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">权重扰动 '+sens.trials+' 次（±'+(sens.band*100).toFixed(0)+'%，种子 '+sens.seed+'）</h3>'
+      +'<p>平均 Spearman：<b>'+sens.mean_spearman+'</b>（最低 '+sens.min_spearman+'）</p>'
+      +'<p>平均 Kendall tau：<b>'+sens.mean_kendall+'</b></p>'
+      +'<p>TOP-'+sens.k+' 重合度：<b>'+sens.mean_topk_jaccard+'</b></p>'
+      +'<p class="text-xs text-gray-500 mt-2">始终在 TOP-'+sens.k+'：'+((sens.stable_top_members||[]).join('、')||'无')+'</p>'
+      +'<p class="text-xs text-gray-500">会摇摆的：'+((sens.flip_flopping||[]).length?sens.flip_flopping.map(f=>f.label+'('+(f.top_rate*100).toFixed(0)+'%)').join('、'):'无（说明当前数据几乎没有真正的维度权衡）')+'</p></div></div>'
+      +'<div class="bg-white p-4 rounded shadow mt-4 text-sm"><h3 class="font-bold mb-2">权重实验台（只预览，不保存）</h3>'
+      +'<div class="grid grid-cols-3 gap-3 mb-3">'+sliders+'</div>'
+      +'<button onclick="runWhatIf()" class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm">重排名</button>'
+      +'<div id="whatif-out" class="mt-3"></div></div>');
+    window._ahpWeights = ahp.weights;
+  }catch(e){err(e)}
+}
+function liveW(){ Object.keys(window._ahpWeights||{}).forEach(k=>{ const el=document.querySelector('#s-'+k), lab=document.querySelector('#v-'+k); if(el&&lab) lab.textContent=el.value; }); }
+
+
+async function runWhatIf(){
+  const w={}; Object.keys(window._ahpWeights||{}).forEach(k=>{w[k]=parseFloat(document.querySelector('#s-'+k).value);});
+  const sum=Object.values(w).reduce((a,b)=>a+b,0);
+  const out=document.querySelector('#whatif-out');
+  if(Math.abs(sum-1)>0.001){ out.innerHTML='<p class="text-red-600 text-sm">权重之和必须为 1，当前 '+sum.toFixed(3)+'</p>'; return; }
+  try{
+    const r=await api('/scoring/whatif',{method:'POST',body:{weights:w,k:5}});
+    const tr=r.items.map(i=>'<tr class="border-t"><td class="p-1">#'+i.rank+'</td><td>'+i.title+'</td><td class="text-center '+(i.old_rank!==i.rank?'text-red-600 font-bold':'')+'">#'+i.old_rank+'</td><td class="text-center font-mono">'+i.new_score+'</td></tr>').join('');
+    out.innerHTML='<p class="text-xs mb-2">名次变动 <b>'+r.ranks_moved+'/'+r.total_candidates+'</b>；TOP-5 换人：'+(r.top_set_changed.length?r.top_set_changed.join('、'):'无')+'</p>'
+      +'<table class="w-full text-xs"><thead class="bg-slate-100"><tr><th class="p-1 text-left">新名次</th><th class="text-left">商品</th><th>旧名次</th><th>新总分</th></tr></thead><tbody>'+tr+'</tbody></table>';
+  }catch(e){ out.innerHTML='<p class="text-red-600 text-sm">'+e.message+'</p>'; }
+}
+async function showOutcomes(){
+  try{
+    const rep=await api('/outcomes/report?k=5');
+    let body;
+    if(rep.usable){
+      const eff=Object.entries(rep.dimension_effect_size).map(([k,v])=>'<tr class="border-t"><td class="p-1">'+k+'</td><td class="text-center font-mono">'+(v===null?'样本不足':((v>0?'+':'')+v))+'</td></tr>').join('');
+      body='<p class="mt-2">precision@'+rep.precision_at_k.k+'：<b>'+rep.precision_at_k.value+'</b>（'+rep.precision_at_k.hits+'/'+rep.precision_at_k.k+'）</p>'
+        +'<p>推荐组 vs 其他组动销率差：<b>'+rep.lift.value+'</b>（'+rep.lift.top_group_sold_rate+' vs '+rep.lift.other_group_sold_rate+'）</p>'
+        +'<h4 class="font-bold mt-3 mb-1">各分项对动销的区分力（效应量）</h4><table class="w-full text-xs"><tbody>'+eff+'</tbody></table>'
+        +'<p class="text-xs text-gray-600 mt-2">'+rep.dimension_read+'</p>';
+    } else {
+      body='<p class="mt-2 text-orange-800 bg-orange-50 border border-orange-200 rounded p-2 text-xs"><b>不给结论：</b>'+rep.reason+'</p>'
+        +(rep.descriptive?'<p class="text-xs text-gray-500 mt-1">仅描述性：动销率 '+rep.descriptive.sold_rate+'，平均 30 日销量 '+rep.descriptive.avg_sales_30d+'</p>':'');
+    }
+    render('<h2 class="text-xl font-bold mb-1">结果回流与命中率</h2>'
+      +'<p class="text-sm text-gray-600 mb-4">AHP 只能保证判断自洽，不能保证判断正确。要验证有效性，必须有当初推荐与后来动销的配对样本。</p>'
+      +'<div class="bg-white p-4 rounded shadow text-sm mb-4"><h3 class="font-bold mb-2">导入配对结果 CSV</h3>'
+      +'<p class="text-xs text-gray-500 mb-2">列：candidate_id 或 external_id，listed，sold，sales_30d，note</p>'
+      +'<input type="file" id="ofile" accept=".csv" class="text-xs" onchange="importOutcomes(this)"></div>'
+      +'<div class="bg-white p-4 rounded shadow text-sm"><h3 class="font-bold mb-2">命中率报告</h3>'
+      +'<p>配对样本：<b>'+rep.paired_samples+'</b> 条（最低要求 '+rep.min_samples+' 条）'+(rep.demo_only===true?' · <span class="text-orange-700">当前全部为演示样本</span>':'')+'</p>'+body+'</div>');
+  }catch(e){err(e)}
+}
+async function importOutcomes(input){
+  const f=input.files[0]; if(!f) return;
+  const fd=new FormData(); fd.append('file',f);
+  try{
+    const r=await fetch('/api/outcomes/import?is_demo=true',{method:'POST',body:fd});
+    const d=await r.json();
+    alert(d.ok?('导入完成：新增 '+d.created+'，更新 '+d.updated+'，跳过 '+d.skipped.length):('失败：'+d.error));
+    showOutcomes();
+  }catch(e){alert(e.message)}
+}
+
+const TABS = {dashboard:showDashboard,signals:showSignals,candidates:showCandidates,compliance:showCompliance,cs:showCS,knowledge:showKnowledge,sources:showSources,settings:showSettings,audit:showAudit,basis:showBasis,outcomes:showOutcomes};
 document.querySelectorAll('#nav a').forEach(a=>a.onclick=()=>{
   document.querySelectorAll('#nav a').forEach(x=>x.classList.remove('bg-slate-700'));
   a.classList.add('bg-slate-700');
   TABS[a.dataset.tab]();
 });
-document.querySelector('#nav a').click();
+const _tab = (location.hash||'').replace('#','');
+(_tab && TABS[_tab] ? document.querySelector('#nav a[data-tab="'+_tab+'"]') : document.querySelector('#nav a')).click();
 </script>
 </body>
 </html>
