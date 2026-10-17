@@ -5,7 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TEMU 全托管选品与客服 Agent</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<style>body{font-family:system-ui,"Microsoft YaHei",sans-serif}</style>
+<style>body{font-family:system-ui,"Microsoft YaHei",sans-serif}
+@media (max-width:720px){
+  body>div.flex{flex-direction:column}
+  aside{width:100%!important}
+  #nav{display:flex;flex-wrap:wrap;gap:4px}
+  main{padding:12px!important;max-width:100%!important}
+  table{display:block;overflow-x:auto;white-space:nowrap}
+  .grid{grid-template-columns:1fr!important}
+}</style>
 </head>
 <body class="bg-slate-100 text-slate-800">
 <div class="flex min-h-screen">
